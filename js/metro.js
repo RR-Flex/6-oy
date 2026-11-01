@@ -1,65 +1,65 @@
 import { LINES, TRANSFERS } from "./data.js";
 
-// Получаем все станции без повторений.
-
-export function getAllStations() {
+export function allStations() {
   return [...new Set(LINES.flatMap((line) => line.stations))].sort((a, b) =>
     a.localeCompare(b, "ru"),
   );
 }
 
-// Определяем линию станции.
-
-export function findStationLine(station) {
+export function lineForStation(station) {
   return LINES.find((line) => line.stations.includes(station)) ?? null;
 }
 
-// Создаём граф метро.
+export function lineForStationList(station) {
+  return LINES.filter((line) => line.stations.includes(station));
+}
 
-function makeGraph() {
+// Создаём граф связей станций.
+
+function buildGraph() {
   const graph = new Map();
 
-  const connect = (from, to) => {
-    if (!graph.has(from)) {
-      graph.set(from, []);
+  const connect = (a, b) => {
+    if (!graph.has(a)) {
+      graph.set(a, []);
     }
 
-    graph.get(from).push(to);
+    graph.get(a).push(b);
   };
 
-  // Связываем соседние станции одной линии.
+  // Соединяем соседние станции на каждой линии.
 
   for (const line of LINES) {
-    line.stations.forEach((station, index) => {
-      if (index === 0) return;
+    for (let i = 1; i < line.stations.length; i += 1) {
+      const current = line.stations[i];
 
-      const previous = line.stations[index - 1];
+      const previous = line.stations[i - 1];
 
-      connect(station, previous);
-      connect(previous, station);
-    });
+      connect(current, previous);
+      connect(previous, current);
+    }
   }
 
-  // Добавляем пересадки.
+  // Добавляем переходы между линиями.
 
-  for (const [first, second] of TRANSFERS) {
-    connect(first, second);
-    connect(second, first);
+  for (const [a, b] of TRANSFERS) {
+    connect(a, b);
+    connect(b, a);
   }
 
   return graph;
 }
 
-const graph = makeGraph();
+const graph = buildGraph();
 
-// Поиск кратчайшего пути.
+// Поиск кратчайшего маршрута.
 
-export function findShortestPath(start, finish) {
-  if (!start || !finish || !graph.has(start) || !graph.has(finish)) {
+export function shortestPath(start, end) {
+  if (!start || !end || !graph.has(start) || !graph.has(end)) {
     return null;
   }
 
-  if (start === finish) {
+  if (start === end) {
     return [start];
   }
 
@@ -67,20 +67,20 @@ export function findShortestPath(start, finish) {
 
   const previous = new Map([[start, null]]);
 
-  let queueIndex = 0;
+  let index = 0;
 
-  while (queueIndex < queue.length) {
-    const current = queue[queueIndex++];
+  while (index < queue.length) {
+    const current = queue[index++];
 
     for (const next of graph.get(current) ?? []) {
       if (previous.has(next)) continue;
 
       previous.set(next, current);
 
-      if (next === finish) {
-        const path = [finish];
+      if (next === end) {
+        const path = [end];
 
-        let step = finish;
+        let step = end;
 
         while (previous.get(step) !== null) {
           step = previous.get(step);
@@ -98,14 +98,10 @@ export function findShortestPath(start, finish) {
   return null;
 }
 
-// Проверяем, является ли станция пересадочной.
-
-export function isTransferStation(station) {
+export function isTransfer(station) {
   return TRANSFERS.some((pair) => pair.includes(station));
 }
 
-// Получаем названия всех линий.
-
-export function getLineNames() {
-  return LINES.map((line) => line.name);
+export function transferCount(path = []) {
+  return path.filter(isTransfer).length;
 }

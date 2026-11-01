@@ -1,49 +1,70 @@
-const PREFIX = "tm_portal_v2_";
+const PREFIX = "tm_portal_v3_";
 
-export const STORAGE_KEYS = {
+export const KEYS = {
   user: `${PREFIX}user`,
   cards: `${PREFIX}cards`,
   theme: `${PREFIX}theme`,
+  customBackground: `${PREFIX}custom_bg`,
+  language: `${PREFIX}language`,
   favorites: `${PREFIX}favorites`,
   lastRoute: `${PREFIX}last_route`,
   notificationsRead: `${PREFIX}notifications_read`,
+  reviews: `${PREFIX}reviews`,
 };
 
-// Получение данных.
-
-export function readStorage(key, fallback) {
+export function readJSON(key, fallback) {
   try {
-    const value = localStorage.getItem(key);
+    const raw = localStorage.getItem(key);
 
-    return value === null ? fallback : JSON.parse(value);
+    return raw === null ? fallback : JSON.parse(raw);
   } catch (error) {
-    console.warn(`Не удалось прочитать ${key}:`, error);
+    console.warn(`Cannot read local storage key ${key}`, error);
 
     return fallback;
   }
 }
 
-// Сохранение данных.
-
-export function writeStorage(key, value) {
+export function writeJSON(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
 
     return true;
   } catch (error) {
-    console.error(`Не удалось сохранить ${key}:`, error);
+    console.error(`Cannot save local storage key ${key}`, error);
 
     return false;
   }
 }
 
-// Удаление данных.
-
-export function removeStorage(key) {
-  localStorage.removeItem(key);
+export function readText(key, fallback = "") {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
 }
 
-// Защита HTML-строк от вставки разметки.
+export function writeText(key, value) {
+  try {
+    localStorage.setItem(key, String(value));
+
+    return true;
+  } catch (error) {
+    console.error(`Cannot save local storage key ${key}`, error);
+
+    return false;
+  }
+}
+
+export function removeKey(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    console.warn(`Cannot remove ${key}`, error);
+  }
+}
+
+// Защита выводимого текста от HTML-вставок.
 
 export function escapeHTML(value = "") {
   return String(value).replace(
@@ -59,7 +80,7 @@ export function escapeHTML(value = "") {
   );
 }
 
-// Оставляем в строке только цифры.
+// Оставляем только цифры.
 
 export function onlyDigits(value = "") {
   return String(value).replace(/\D/g, "");

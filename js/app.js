@@ -1,48 +1,57 @@
-import { LINES, DEMO_TRIPS, NOTIFICATIONS } from "./data.js";
+import { LINES, DEMO_TRIPS } from "./data.js";
 
 import {
-  STORAGE_KEYS,
-  readStorage,
-  writeStorage,
+  KEYS,
+  readJSON,
+  writeJSON,
+  removeKey,
   escapeHTML,
   onlyDigits,
 } from "./storage.js";
 
 import {
-  getAllStations,
-  findStationLine,
-  findShortestPath,
-  isTransferStation,
-  getLineNames,
+  allStations,
+  lineForStation,
+  shortestPath,
+  isTransfer,
+  transferCount,
 } from "./metro.js";
 
-import {
-  getCurrentUser,
-  setAuthMode,
-  getAuthMode,
-  saveDemoUser,
-  logoutUser,
-} from "./auth.js";
+import { initI18n, t, lineName } from "./i18n.js";
 
-import { getCards, addDemoCard, removeDemoCard } from "./cards.js";
+import { initTheme } from "./theme.js";
+
+import {
+  initCityMap,
+  initRouteMap,
+  centerCityMap,
+  focusStationOnMap,
+  drawRouteOnMap,
+  setupMapControls,
+} from "./map.js";
+
+import { initArrivals } from "./arrivals.js";
+
+import { initReviews } from "./reviews.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-let pendingCard = null;
-let toastTimer = null;
-let welcomeMessage = "";
+let activeLine = "all";
 
-let activeLineFilter = "all";
-let stationQuery = "";
+let stationSearch = "";
+
+let toastTimer = null;
 
 // ======================================
-// TOAST MESSAGE
+// TOAST
 // ======================================
 
 function toast(message) {
   const element = $("#toast");
+
+  if (!element) return;
 
   element.textContent = message;
 
@@ -52,32 +61,50 @@ function toast(message) {
 
   toastTimer = setTimeout(() => {
     element.classList.remove("show");
-  }, 2600);
+  }, 2500);
 }
 
 // ======================================
-// PAGE NAVIGATION
+// NAVIGATION
 // ======================================
 
-function showPage(pageName) {
+function showPage(name) {
   $$(".page").forEach((page) => {
-    page.classList.toggle("active", page.id === `page-${pageName}`);
+    page.classList.toggle("active", page.id === `page-${name}`);
   });
 
-  $$("[data-page-link]").forEach((link) => {
-    link.classList.toggle("active", link.dataset.pageLink === pageName);
+  $$("[data-page-link]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.pageLink === name);
   });
 
   $("#mobileMenu").hidden = true;
 
-  if (pageName === "profile") {
+  $("#notificationPanel").hidden = true;
+
+  $("#themePanel").hidden = true;
+
+  if (name === "profile") {
     renderProfile();
+  }
+
+  if (name === "map") {
+    initCityMap().then((count) => {
+      if (!count) {
+        toast(t("osmUnavailable"));
+      }
+    });
+  }
+
+  if (name === "route") {
+    initRouteMap();
   }
 
   window.scrollTo({
     top: 0,
     behavior: "smooth",
   });
+
+  observeReveals(document.getElementById(`page-${name}`));
 }
 
 function setupNavigation() {
@@ -93,19 +120,21 @@ function setupNavigation() {
     });
   });
 
-  $("#mobileMenuButton").addEventListener("click", () => {
+  $("#mobileMenuButton")?.addEventListener("click", () => {
     $("#mobileMenu").hidden = !$("#mobileMenu").hidden;
   });
 
-  $("#authButton").addEventListener("click", () => {
-    if (getCurrentUser()) {
+  $("#authButton")?.addEventListener("click", () => {
+    if (getUser()) {
       showPage("profile");
     } else {
-      openAuthModal();
+      $("#authModal").hidden = false;
     }
   });
 
-  $("#profileLogin").addEventListener("click", openAuthModal);
+  $("#profileLogin")?.addEventListener("click", () => {
+    $("#authModal").hidden = false;
+  });
 }
 
 // ======================================
@@ -113,10 +142,26 @@ function setupNavigation() {
 // ======================================
 
 function setupModals() {
-  $$("[data-close]").forEach((button) => {
-    button.addEventListener("click", () => {
-      $(`#${button.dataset.close}`).hidden = true;
-    });
+  document.addEventListener("click", (event) => {
+    const close = event.target.closest("[data-close]");
+
+    if (close) {
+      const modal = document.getElementById(close.dataset.close);
+
+      if (modal) {
+        modal.hidden = true;
+      }
+    }
+
+    const open = event.target.closest("[data-open-modal]");
+
+    if (open) {
+      const modal = document.getElementById(open.dataset.openModal);
+
+      if (modal) {
+        modal.hidden = false;
+      }
+    }
   });
 
   $$(".modal").forEach((modal) => {
@@ -137,44 +182,7 @@ function setupModals() {
 }
 
 // ======================================
-// LIGHT / DARK THEME
-// ======================================
-
-function setupTheme() {
-  const savedTheme = readStorage(STORAGE_KEYS.theme, "light");
-
-  document.documentElement.dataset.theme = savedTheme;
-
-  updateThemeButton();
-
-  $("#themeToggle").addEventListener("click", () => {
-    const nextTheme =
-      document.documentElement.dataset.theme === "light" ? "dark" : "light";
-
-    document.documentElement.dataset.theme = nextTheme;
-
-    writeStorage(STORAGE_KEYS.theme, nextTheme);
-
-    updateThemeButton();
-
-    toast(
-      nextTheme === "dark" ? "Включена тёмная тема" : "Включена светлая тема",
-    );
-  });
-}
-
-function updateThemeButton() {
-  const isLight = document.documentElement.dataset.theme === "light";
-
-  $("#themeToggle").textContent = isLight ? "☾" : "☼";
-
-  $("#themeToggle").title = isLight
-    ? "Включить тёмную тему"
-    : "Включить светлую тему";
-}
-
-// ======================================
-// LIVE CLOCK
+// CLOCK
 // ======================================
 
 function setupClock() {
@@ -187,17 +195,22 @@ function setupClock() {
       timeZone: "Asia/Tashkent",
     }).format(now);
 
-    $("#liveDate").textContent = new Intl.DateTimeFormat("ru-RU", {
-      weekday: "long",
-      day: "numeric",
-      month: "long",
-      timeZone: "Asia/Tashkent",
-    }).format(now);
+    $("#liveDate").textContent = new Intl.DateTimeFormat(
+      document.documentElement.lang || "ru",
+      {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        timeZone: "Asia/Tashkent",
+      },
+    ).format(now);
   };
 
   update();
 
-  setInterval(update, 30_000);
+  setInterval(update, 30000);
+
+  document.addEventListener("languagechange", update);
 }
 
 // ======================================
@@ -205,63 +218,101 @@ function setupClock() {
 // ======================================
 
 function setupNotifications() {
-  const read = readStorage(STORAGE_KEYS.notificationsRead, false);
-
-  renderNotifications();
+  const read = readJSON(KEYS.notificationsRead, false);
 
   $("#notificationDot").classList.toggle("read", read);
 
-  $("#notificationToggle").addEventListener("click", () => {
+  renderNotifications();
+
+  $("#notificationButton")?.addEventListener("click", () => {
     $("#notificationPanel").hidden = !$("#notificationPanel").hidden;
 
     if (!$("#notificationPanel").hidden) {
-      writeStorage(STORAGE_KEYS.notificationsRead, true);
+      writeJSON(KEYS.notificationsRead, true);
 
       $("#notificationDot").classList.add("read");
     }
   });
 
-  $("#markNotificationsRead").addEventListener("click", () => {
-    writeStorage(STORAGE_KEYS.notificationsRead, true);
+  $("#readNotifications")?.addEventListener("click", () => {
+    writeJSON(KEYS.notificationsRead, true);
 
     $("#notificationDot").classList.add("read");
 
-    toast("Уведомления отмечены прочитанными");
+    toast(t("markRead"));
   });
 
   document.addEventListener("click", (event) => {
-    if (!event.target.closest("#notificationPanel, #notificationToggle")) {
+    if (!event.target.closest("#notificationPanel, #notificationButton")) {
       $("#notificationPanel").hidden = true;
     }
   });
 }
 
 function renderNotifications() {
-  $("#notificationList").innerHTML = NOTIFICATIONS.map(
-    (item) => `
+  const translated = {
+    ru: [
+      [
+        "Добро пожаловать!",
+        "Здесь можно строить маршруты, выбирать темы и оставлять отзывы.",
+      ],
+
+      ["Интерактивная карта", "Приближай и перемещай карту Ташкента."],
+
+      ["Демо-режим", "Время прибытия поездов и баланс карт не выдумываются."],
+    ],
+
+    en: [
+      ["Welcome!", "Plan routes, choose themes and leave reviews here."],
+
+      ["Interactive map", "Zoom and move around the map of Tashkent."],
+
+      ["Demo mode", "Train arrivals and card balances are not fabricated."],
+    ],
+
+    uz: [
+      [
+        "Xush kelibsiz!",
+        "Yo‘nalish tuzing, mavzuni tanlang va fikr qoldiring.",
+      ],
+
+      ["Interaktiv xarita", "Toshkent xaritasini kattalashtiring va suring."],
+
+      ["Demo rejim", "Poyezd vaqti va karta balansi to‘qib chiqarilmaydi."],
+    ],
+  };
+
+  const lang = document.documentElement.lang || "ru";
+
+  const items = translated[lang] || translated.ru;
+
+  $("#notificationList").innerHTML = items
+    .map(
+      (item, index) => `
 
       <article class="notification-item">
 
-        <span class="n-icon">
-          ${escapeHTML(item.icon)}
+        <span class="notification-icon">
+          ${["✦", "⌖", "ⓘ"][index]}
         </span>
 
         <div>
 
-          <b>${escapeHTML(item.title)}</b>
+          <b>${escapeHTML(item[0])}</b>
 
-          <p>${escapeHTML(item.text)}</p>
+          <p>${escapeHTML(item[1])}</p>
 
         </div>
 
       </article>
 
     `,
-  ).join("");
+    )
+    .join("");
 }
 
 // ======================================
-// METRO MAP
+// MAP DIRECTORY
 // ======================================
 
 function renderLineFilters() {
@@ -270,62 +321,65 @@ function renderLineFilters() {
   filters.innerHTML =
     `
 
-    <button class="filter active" data-line="all">
-      Все линии
+    <button
+      class="filter ${activeLine === "all" ? "active" : ""}"
+      data-line="all"
+    >
+      ${escapeHTML(t("allLines"))}
     </button>
 
   ` +
-    getLineNames()
-      .map(
-        (name) => `
+    LINES.map(
+      (line) => `
 
     <button
-      class="filter"
-      data-line="${escapeHTML(name)}"
+      class="filter ${activeLine === line.id ? "active" : ""}"
+      data-line="${escapeHTML(line.id)}"
     >
-      ${escapeHTML(name)}
+      ${escapeHTML(lineName(line.id))}
     </button>
 
   `,
-      )
-      .join("");
+    ).join("");
 
-  filters.addEventListener("click", (event) => {
+  // Делегирование обработчика, чтобы он не дублировался.
+
+  filters.onclick = (event) => {
     const button = event.target.closest("[data-line]");
 
     if (!button) return;
 
-    activeLineFilter = button.dataset.line;
+    activeLine = button.dataset.line;
 
-    $$(".filter", filters).forEach((filter) => {
-      filter.classList.toggle("active", filter === button);
+    $$("[data-line]", filters).forEach((item) => {
+      item.classList.toggle("active", item === button);
     });
 
-    renderMap();
-  });
+    renderStationGroups();
+  };
 }
 
-// Render metro stations.
+// Отображение списка станций.
 
-function renderMap() {
-  const target = $("#metroMap");
+function renderStationGroups() {
+  const target = $("#stationGroups");
 
-  const favoriteStations = readStorage(STORAGE_KEYS.favorites, []);
+  const query = stationSearch.trim().toLocaleLowerCase("ru");
 
-  const query = stationQuery.trim().toLocaleLowerCase("ru");
-
-  const visibleLines = LINES.filter(
-    (line) => activeLineFilter === "all" || line.name === activeLineFilter,
-  );
+  const favorites = readJSON(KEYS.favorites, []);
 
   target.innerHTML = "";
 
-  for (const line of visibleLines) {
-    const matchedStations = line.stations.filter((station) =>
+  for (const line of LINES) {
+    if (activeLine !== "all" && line.id !== activeLine) {
+      continue;
+    }
+
+    const stations = line.stations.filter((station) =>
       station.toLocaleLowerCase("ru").includes(query),
     );
 
-    if (!matchedStations.length) continue;
+    if (!stations.length) continue;
 
     const block = document.createElement("article");
 
@@ -337,16 +391,13 @@ function renderMap() {
 
         <span
           class="line-dot"
-          style="
-            --line-color:${line.color};
-            background:${line.color}
-          "
+          style="--line-color:${line.color}"
         ></span>
 
-        ${escapeHTML(line.name)}
+        ${escapeHTML(lineName(line.id))}
 
-        <span style="color:var(--muted);font-weight:500">
-          · ${matchedStations.length}
+        <span class="muted-count">
+          · ${stations.length}
         </span>
 
       </div>
@@ -354,25 +405,18 @@ function renderMap() {
 
       <div class="station-pills">
 
-        ${matchedStations
+        ${stations
           .map(
             (station) => `
 
           <button
-            class="station-pill ${
-              favoriteStations.includes(station) ? "favorite" : ""
-            }"
+            class="station-pill"
             data-station="${escapeHTML(station)}"
-            aria-label="Открыть ${escapeHTML(station)}"
           >
 
             ${escapeHTML(station)}
 
-            ${
-              favoriteStations.includes(station)
-                ? '<span class="star">★</span>'
-                : ""
-            }
+            ${favorites.includes(station) ? " ★" : ""}
 
           </button>
 
@@ -390,355 +434,340 @@ function renderMap() {
   if (!target.children.length) {
     target.innerHTML = `
 
-      <p class="empty-state">
-        Станция не найдена. Попробуй изменить запрос.
-      </p>
+      <div class="empty-state">
+        ${escapeHTML(t("noStationsFound"))}
+      </div>
 
     `;
   }
 
-  $$(".station-pill", target).forEach((button) => {
+  $$("[data-station]", target).forEach((button) => {
     button.addEventListener("click", () => {
-      showStationInfo(button.dataset.station);
+      selectStation(button.dataset.station);
     });
   });
 }
 
-// Show information about selected station.
+// Открываем подробности станции.
 
-function showStationInfo(station) {
-  const line = findStationLine(station);
+function selectStation(station) {
+  const line = lineForStation(station);
 
-  if (!line) return;
-
-  const favorites = readStorage(STORAGE_KEYS.favorites, []);
+  const favorites = readJSON(KEYS.favorites, []);
 
   const isFavorite = favorites.includes(station);
 
-  const info = $("#stationInfo");
+  const detail = $("#stationDetail");
 
-  info.hidden = false;
+  detail.hidden = false;
 
-  info.innerHTML = `
+  detail.innerHTML = `
 
     <b>${escapeHTML(station)}</b>
 
     <p>
-      ${escapeHTML(line.name)} линия ·
-      ${line.stations.indexOf(station) + 1}-я станция
-      в демо-списке
+      ${escapeHTML(t("stationInfo"))}:
+      ${escapeHTML(line ? lineName(line.id) : "—")}
     </p>
 
-    <button id="favoriteStationButton">
-      ${isFavorite ? "★ Убрать из избранного" : "☆ Добавить в избранное"}
-    </button>
+    <div class="detail-actions">
+
+      <button class="text-button" id="toggleFavorite">
+        ${escapeHTML(isFavorite ? t("removeFavorite") : t("favorite"))}
+      </button>
+
+      <button class="text-button" id="useAsStart">
+        ${escapeHTML(t("from"))}
+      </button>
+
+      <button class="text-button" id="useAsEnd">
+        ${escapeHTML(t("to"))}
+      </button>
+
+    </div>
 
   `;
 
-  $("#favoriteStationButton").addEventListener("click", () => {
-    const next = readStorage(STORAGE_KEYS.favorites, []);
+  // Избранное.
 
-    const updated = next.includes(station)
-      ? next.filter((item) => item !== station)
-      : [...next, station];
+  $("#toggleFavorite").addEventListener("click", () => {
+    const current = readJSON(KEYS.favorites, []);
 
-    writeStorage(STORAGE_KEYS.favorites, updated);
+    const next = current.includes(station)
+      ? current.filter((item) => item !== station)
+      : [...current, station];
 
-    renderMap();
+    writeJSON(KEYS.favorites, next);
 
-    showStationInfo(station);
+    renderStationGroups();
 
-    toast(
-      updated.includes(station)
-        ? "Станция добавлена в избранное"
-        : "Станция удалена из избранного",
-    );
+    selectStation(station);
+
+    toast(t(next.includes(station) ? "addedFavorite" : "removedFavorite"));
   });
+
+  // Использовать станцию как начало маршрута.
+
+  $("#useAsStart").addEventListener("click", () => {
+    $("#routeFrom").value = station;
+
+    showPage("route");
+  });
+
+  // Использовать станцию как конец маршрута.
+
+  $("#useAsEnd").addEventListener("click", () => {
+    $("#routeTo").value = station;
+
+    showPage("route");
+  });
+
+  // Центрируем карту на станции, если есть координаты.
+
+  focusStationOnMap(station);
 }
 
-function setupMapSearch() {
+function setupMapDirectory() {
   renderLineFilters();
 
-  renderMap();
+  renderStationGroups();
 
   $("#stationSearch").addEventListener("input", (event) => {
-    stationQuery = event.target.value;
+    stationSearch = event.target.value;
 
-    renderMap();
+    renderStationGroups();
   });
+
+  setupMapControls();
 }
 
 // ======================================
 // ROUTE PLANNER
 // ======================================
 
-function fillStationSelects() {
-  const stations = getAllStations();
+function fillRouteSelects() {
+  const stations = allStations();
 
-  for (const selector of ["#routeFrom", "#routeTo"]) {
-    const select = $(selector);
+  const options =
+    `
 
-    select.innerHTML =
-      `
+    <option value="">
+      ${escapeHTML(t("chooseStation"))}
+    </option>
 
-      <option value="">
-        Выбери станцию
-      </option>
+  ` +
+    stations
+      .map(
+        (station) => `
 
-    ` +
-      stations
-        .map(
-          (station) => `
+    <option value="${escapeHTML(station)}">
+      ${escapeHTML(station)}
+    </option>
 
-      <option value="${escapeHTML(station)}">
-        ${escapeHTML(station)}
-      </option>
+  `,
+      )
+      .join("");
 
-    `,
-        )
-        .join("");
-  }
+  $("#routeFrom").innerHTML = options;
+
+  $("#routeTo").innerHTML = options;
+
+  initArrivals(stations);
 }
 
-function setupRoutePlanner() {
-  fillStationSelects();
+// Рассчитываем маршрут и показываем его на карте.
 
-  // Swap route start and finish.
-
-  $("#swapStations").addEventListener("click", () => {
-    const from = $("#routeFrom");
-    const to = $("#routeTo");
-
-    [from.value, to.value] = [to.value, from.value];
-  });
-
-  $("#calculateRoute").addEventListener("click", calculateRoute);
-
-  // Restore last route.
-
-  const lastRoute = readStorage(STORAGE_KEYS.lastRoute, null);
-
-  if (lastRoute) {
-    $("#lastRoute").hidden = false;
-
-    $("#restoreLastRoute").textContent = `${lastRoute.from} → ${lastRoute.to}`;
-
-    $("#restoreLastRoute").addEventListener("click", () => {
-      $("#routeFrom").value = lastRoute.from;
-
-      $("#routeTo").value = lastRoute.to;
-
-      calculateRoute();
-    });
-  }
-}
-
-// Calculate route.
-
-function calculateRoute() {
+async function calculateRoute() {
   const start = $("#routeFrom").value;
 
-  const finish = $("#routeTo").value;
+  const end = $("#routeTo").value;
+
+  if (!start || !end) {
+    return toast(t("selectStation"));
+  }
+
+  if (start === end) {
+    return toast(t("sameStation"));
+  }
+
+  const path = shortestPath(start, end);
 
   const result = $("#routeResult");
-
-  if (!start || !finish) {
-    return toast("Выбери начальную и конечную станции");
-  }
-
-  if (start === finish) {
-    return toast("Выбери две разные станции");
-  }
-
-  const path = findShortestPath(start, finish);
 
   result.hidden = false;
 
   if (!path) {
     result.innerHTML = `
 
-      <p class="empty-state">
-        В демонстрационной схеме путь не найден.
-      </p>
+      <div class="empty-state">
+        ${escapeHTML(t("routeNotFound"))}
+      </div>
 
     `;
 
     return;
   }
 
-  const transferCount = path.filter(isTransferStation).length;
+  const transfers = transferCount(path);
+
+  const steps = path
+    .map((station, index) => {
+      let label = t("nextStation");
+
+      if (index === 0) {
+        label = t("startStation");
+      } else if (index === path.length - 1) {
+        label = t("destinationStation");
+      } else if (isTransfer(station)) {
+        label = t("transferStation");
+      }
+
+      return `
+
+      <div class="route-step">
+
+        <span class="route-step-marker"></span>
+
+        <div>
+
+          <b>${escapeHTML(station)}</b>
+
+          <small>${escapeHTML(label)}</small>
+
+        </div>
+
+      </div>
+
+    `;
+    })
+    .join("");
 
   result.innerHTML = `
 
     <div class="route-summary">
 
-      <span>МАРШРУТ ПОСТРОЕН</span>
+      <span>${escapeHTML(t("routeFound"))}</span>
 
-      <b>${path.length - 1} перегонов</b>
+      <b>
+        ${path.length - 1}
+        ${escapeHTML(t("segments"))}
+      </b>
 
       <small>
-        Пересадочных станций на пути: ${transferCount}.
-        Расписание и время в пути не подключены.
+        ${escapeHTML(t("transfers"))}: ${transfers}.
+        ${escapeHTML(t("routeSaved"))}
       </small>
 
     </div>
 
 
-    <div>
-
-      ${path
-        .map(
-          (station, index) => `
-
-        <div class="route-step">
-
-          <span class="route-step-marker"></span>
-
-          <div>
-
-            <b>${escapeHTML(station)}</b>
-
-            <small>
-
-              ${
-                index === 0
-                  ? "Начальная станция"
-                  : index === path.length - 1
-                    ? "Пункт назначения"
-                    : isTransferStation(station)
-                      ? "Возможная пересадка"
-                      : "Следующая станция"
-              }
-
-            </small>
-
-          </div>
-
-        </div>
-
-      `,
-        )
-        .join("")}
-
+    <div class="route-steps">
+      ${steps}
     </div>
 
 
     <button
       class="button button-outline full-button"
-      id="copyRouteButton"
-      type="button"
+      id="copyRoute"
     >
-      Скопировать маршрут
+      ${escapeHTML(t("copyRoute"))}
     </button>
 
   `;
 
-  // Save last route.
+  // Сохраняем последний маршрут.
 
-  writeStorage(STORAGE_KEYS.lastRoute, {
+  writeJSON(KEYS.lastRoute, {
     from: start,
-    to: finish,
+    to: end,
   });
 
-  $("#lastRoute").hidden = false;
+  // Копирование.
 
-  $("#restoreLastRoute").textContent = `${start} → ${finish}`;
-
-  // Copy route to clipboard.
-
-  $("#copyRouteButton").addEventListener("click", async () => {
-    const text = path.join(" → ");
-
+  $("#copyRoute").addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(path.join(" → "));
 
-      toast("Маршрут скопирован");
+      toast(t("copied"));
     } catch {
-      toast("Не удалось скопировать. Выдели маршрут вручную.");
+      toast(path.join(" → "));
     }
   });
+
+  showPage("route");
+
+  const mapStatus = $("#routeMapStatus");
+
+  mapStatus.textContent = t("loading");
+
+  const drawn = await drawRouteOnMap(path);
+
+  mapStatus.textContent = drawn.ok
+    ? `${drawn.matched}/${path.length} stations matched`
+    : t("mapCoordinatesMissing");
+}
+
+function setupRoutePlanner() {
+  fillRouteSelects();
+
+  const last = readJSON(KEYS.lastRoute, null);
+
+  if (
+    last &&
+    allStations().includes(last.from) &&
+    allStations().includes(last.to)
+  ) {
+    $("#routeFrom").value = last.from;
+
+    $("#routeTo").value = last.to;
+  }
+
+  // Меняем станции местами.
+
+  $("#swapStations").addEventListener("click", () => {
+    const a = $("#routeFrom").value;
+
+    $("#routeFrom").value = $("#routeTo").value;
+
+    $("#routeTo").value = a;
+  });
+
+  $("#calculateRoute").addEventListener("click", calculateRoute);
 }
 
 // ======================================
-// AUTHENTICATION
+// AUTH
 // ======================================
 
-function openAuthModal() {
-  setAuthMode("login");
-
-  updateAuthModeUI();
-
-  $("#authModal").hidden = false;
+function getUser() {
+  return readJSON(KEYS.user, null);
 }
 
-function updateAuthModeUI() {
-  const isLogin = getAuthMode() === "login";
-
-  $("#authTitle").textContent = isLogin ? "Войти" : "Создать аккаунт";
-
-  $("#authNameWrap").hidden = isLogin;
-
-  $("#toggleAuthMode").textContent = isLogin
-    ? "Создать аккаунт"
-    : "У меня уже есть аккаунт";
-
-  $("#authPassword").autocomplete = isLogin
-    ? "current-password"
-    : "new-password";
-
-  $("#authError").textContent = "";
+function syncAuthButton() {
+  $("#authButton").textContent = getUser() ? t("profile") : t("signIn");
 }
 
 function setupAuth() {
-  // Switch between login and registration.
-
-  $("#toggleAuthMode").addEventListener("click", () => {
-    setAuthMode(getAuthMode() === "login" ? "register" : "login");
-
-    updateAuthModeUI();
-  });
-
-  // Submit auth form.
-
   $("#authForm").addEventListener("submit", (event) => {
     event.preventDefault();
 
-    const phone = $("#authPhone").value.trim();
-
-    const password = $("#authPassword").value;
-
     const name = $("#authName").value.trim();
 
-    if (!/^\+?[0-9 ()-]{9,18}$/.test(phone)) {
-      $("#authError").textContent = "Проверь номер телефона.";
+    const phone = $("#authPhone").value.trim();
+
+    if (name.length < 2 || !/^\+?[0-9 ()-]{9,20}$/.test(phone)) {
+      $("#authError").textContent = t("authNameRequired");
 
       return;
     }
 
-    if (password.length < 6) {
-      $("#authError").textContent = "Пароль должен быть не короче 6 символов.";
+    // Сохраняем только замаскированный телефон.
 
-      return;
-    }
-
-    if (getAuthMode() === "register" && !name) {
-      $("#authError").textContent = "Укажи имя.";
-
-      return;
-    }
-
-    // В демо пароль намеренно не сохраняется.
-    // Реальную проверку выполняет только backend.
-
-    saveDemoUser({
-      name: name || "Пассажир",
-      phone,
+    writeJSON(KEYS.user, {
+      name: name.slice(0, 40),
+      phoneMasked: maskPhone(phone),
+      createdAt: new Date().toISOString(),
     });
-
-    welcomeMessage =
-      getAuthMode() === "register"
-        ? "Аккаунт создан в демо-режиме. Добро пожаловать!"
-        : "С возвращением!";
 
     $("#authModal").hidden = true;
 
@@ -746,101 +775,66 @@ function setupAuth() {
 
     syncAuthButton();
 
+    renderProfile();
+
     showPage("profile");
 
-    toast(welcomeMessage);
+    toast(t("welcomeBack"));
   });
 
-  // Logout.
+  // Выход.
 
   $("#logoutButton").addEventListener("click", () => {
-    logoutUser();
+    removeKey(KEYS.user);
 
     syncAuthButton();
 
     showPage("home");
 
-    toast("Ты вышел из демо-аккаунта");
+    toast(t("profileLoggedOut"));
   });
 
   syncAuthButton();
 }
 
-function syncAuthButton() {
-  $("#authButton").textContent = getCurrentUser() ? "Профиль" : "Войти";
+function maskPhone(value) {
+  const digits = onlyDigits(value);
+
+  return digits.length >= 4 ? `••• ••• ${digits.slice(-4)}` : "•••";
 }
 
 // ======================================
-// PROFILE
+// TRANSPORT CARDS
 // ======================================
 
-function renderProfile() {
-  const user = getCurrentUser();
+function renderCards() {
+  const cards = readJSON(KEYS.cards, []);
 
-  $("#profileGuest").hidden = Boolean(user);
-
-  $("#profileContent").hidden = !user;
-
-  if (!user) return;
-
-  $("#profileName").textContent = user.name;
-
-  $("#welcomeNotice").hidden = !welcomeMessage;
-
-  $("#welcomeNotice").textContent = welcomeMessage;
-
-  welcomeMessage = "";
-
-  const cards = getCards();
-
-  $("#cardCount").textContent = cards.length;
-
-  $("#tripCount").textContent = DEMO_TRIPS.length;
-
-  renderCards(cards);
-
-  renderTrips();
-}
-
-// Render cards.
-
-function renderCards(cards = getCards()) {
   $("#cardsList").innerHTML = cards
     .map(
       (card) => `
 
-    <article class="transport-card ${card.type.toLowerCase()}">
+    <article class="transport-card ${escapeHTML(card.type.toLowerCase())}">
 
       <div class="transport-card-top">
-
         <b>${escapeHTML(card.type)}</b>
-
         <span>DEMO CARD</span>
-
       </div>
-
 
       <div class="transport-card-number">
-
         •••• •••• •••• ${escapeHTML(card.last4)}
-
       </div>
-
 
       <div class="transport-card-bottom">
-
-        <span>${escapeHTML(card.phoneMasked)}</span>
-
-        <span>ДОБАВЛЕНА</span>
-
+        <span>${escapeHTML(card.phoneMasked || "LOCAL PROFILE")}</span>
+        <span>DEMO</span>
       </div>
-
 
       <button
         class="remove-card"
         data-remove-card="${escapeHTML(card.id)}"
       >
-        Удалить
+        ×
       </button>
 
     </article>
@@ -851,22 +845,28 @@ function renderCards(cards = getCards()) {
 
   $("#emptyCards").hidden = cards.length > 0;
 
-  // Remove card buttons.
+  $("#cardCount").textContent = String(cards.length);
+
+  // Удаление карты.
 
   $$("[data-remove-card]").forEach((button) => {
     button.addEventListener("click", () => {
-      removeDemoCard(button.dataset.removeCard);
+      const next = readJSON(KEYS.cards, []).filter(
+        (card) => card.id !== button.dataset.removeCard,
+      );
+
+      writeJSON(KEYS.cards, next);
 
       renderCards();
 
-      $("#cardCount").textContent = getCards().length;
-
-      toast("Карта удалена из демо-профиля");
+      toast(t("cardRemoved"));
     });
   });
 }
 
-// Render trip history.
+// ======================================
+// TRIP HISTORY
+// ======================================
 
 function renderTrips() {
   const filter = $("#tripFilter").value;
@@ -888,27 +888,22 @@ function renderTrips() {
 
           ${escapeHTML(trip.from)}
 
-          <span style="color:var(--blue)">→</span>
+          <span style="color:var(--primary)">→</span>
 
           ${escapeHTML(trip.to)}
 
         </div>
 
         <div class="trip-meta">
-
           ${escapeHTML(trip.date)}
           ·
           ${escapeHTML(trip.vehicle)}
-
         </div>
 
       </div>
 
-
       <div class="trip-cost">
-
         ${trip.cost.toLocaleString("ru-RU")} сум
-
       </div>
 
     </article>
@@ -918,163 +913,259 @@ function renderTrips() {
       .join("") ||
     `
 
-    <p class="empty-state">
-      Нет поездок для выбранного фильтра.
-    </p>
+    <div class="empty-state">—</div>
 
   `;
+
+  $("#tripCount").textContent = String(DEMO_TRIPS.length);
 }
 
 // ======================================
-// PROFILE EVENTS
+// PROFILE
 // ======================================
+
+function renderProfile() {
+  const user = getUser();
+
+  $("#profileGuest").hidden = Boolean(user);
+
+  $("#profileContent").hidden = !user;
+
+  if (!user) return;
+
+  $("#profileName").textContent = user.name;
+
+  renderCards();
+
+  renderTrips();
+}
 
 function setupProfile() {
   $("#tripFilter").addEventListener("change", renderTrips);
-
-  // Open add card modal.
 
   $("#addCardButton").addEventListener("click", () => {
     $("#cardForm").reset();
 
     $("#cardError").textContent = "";
 
-    updateCardPreview();
-
     $("#cardModal").hidden = false;
   });
 
-  $("#cardType").addEventListener("change", updateCardPreview);
+  // Добавление карты.
 
-  $("#cardForm").addEventListener("submit", handleCardSubmit);
+  $("#cardForm").addEventListener("submit", (event) => {
+    event.preventDefault();
 
-  $("#otpForm").addEventListener("submit", handleOtpSubmit);
-}
+    if (!getUser()) {
+      $("#cardModal").hidden = true;
 
-// Update card design.
+      $("#authModal").hidden = false;
 
-function updateCardPreview() {
-  const type = $("#cardType").value;
+      return;
+    }
 
-  const preview = $("#selectedCardPreview");
+    const type = $("#cardType").value;
 
-  preview.className = `card-preview ${type.toLowerCase()}`;
+    const number = onlyDigits($("#cardNumber").value);
 
-  preview.innerHTML = `
+    const minimum = type === "ATTO" ? 8 : 16;
 
-    <b>${escapeHTML(type)}</b>
+    if (number.length < minimum || number.length > 19) {
+      $("#cardError").textContent = t("cardInvalid");
 
-    <small>•••• •••• •••• 0000</small>
+      return;
+    }
 
-  `;
-}
+    const cards = readJSON(KEYS.cards, []);
 
-// Mask phone.
+    const last4 = number.slice(-4);
 
-function maskPhone(phone) {
-  const digits = onlyDigits(phone);
+    if (cards.some((card) => card.type === type && card.last4 === last4)) {
+      $("#cardError").textContent = t("cardDuplicate");
 
-  return digits.length >= 4 ? `••• ••• ${digits.slice(-4)}` : "•••";
+      return;
+    }
+
+    cards.push({
+      id: globalThis.crypto?.randomUUID?.() ?? `card-${Date.now()}`,
+
+      type,
+
+      last4,
+
+      phoneMasked: getUser().phoneMasked || "•••",
+
+      addedAt: new Date().toISOString(),
+    });
+
+    writeJSON(KEYS.cards, cards);
+
+    // Полный номер не сохраняем.
+
+    $("#cardNumber").value = "";
+
+    $("#cardModal").hidden = true;
+
+    renderProfile();
+
+    toast(t("cardAdded"));
+  });
 }
 
 // ======================================
-// ADD CARD
+// TABS AND ACCORDION
 // ======================================
 
-function handleCardSubmit(event) {
-  event.preventDefault();
+function setupExtras() {
+  $("#extrasTabs").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-tab]");
 
-  if (!getCurrentUser()) {
-    return toast("Сначала войди в демо-аккаунт");
-  }
+    if (!button) return;
 
-  const type = $("#cardType").value;
+    const tab = button.dataset.tab;
 
-  const number = onlyDigits($("#cardNumber").value);
+    $$("[data-tab]").forEach((item) => {
+      const active = item === button;
 
-  const phone = $("#cardPhone").value.trim();
+      item.classList.toggle("active", active);
 
-  const minDigits = type === "ATTO" ? 8 : 16;
+      item.setAttribute("aria-selected", String(active));
+    });
 
-  if (number.length < minDigits || number.length > 19) {
-    $("#cardError").textContent =
-      `Номер должен содержать ${minDigits}–19 цифр.`;
+    $$("[data-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.panel === tab);
+    });
+  });
+
+  // Управление вкладками клавиатурой.
+
+  $("#extrasTabs").addEventListener("keydown", (event) => {
+    const buttons = $$("[data-tab]", $("#extrasTabs"));
+
+    const index = buttons.indexOf(document.activeElement);
+
+    if (index < 0) return;
+
+    let next = index;
+
+    if (event.key === "ArrowRight") {
+      next = (index + 1) % buttons.length;
+    }
+
+    if (event.key === "ArrowLeft") {
+      next = (index - 1 + buttons.length) % buttons.length;
+    }
+
+    if (next !== index) {
+      event.preventDefault();
+
+      buttons[next].focus();
+
+      buttons[next].click();
+    }
+  });
+
+  // Аккордеон: только один открытый вопрос.
+
+  $("#faqAccordion")
+    .querySelectorAll("details")
+    .forEach((detail) => {
+      detail.addEventListener("toggle", () => {
+        if (!detail.open) return;
+
+        $("#faqAccordion")
+          .querySelectorAll("details")
+          .forEach((other) => {
+            if (other !== detail) {
+              other.open = false;
+            }
+          });
+      });
+    });
+
+  // Кнопка "наверх".
+
+  const back = $("#backToTop");
+
+  window.addEventListener(
+    "scroll",
+    () => {
+      back.classList.toggle("visible", window.scrollY > 450);
+    },
+    { passive: true },
+  );
+
+  back.addEventListener("click", () => {
+    window.scrollTo({
+      top: 0,
+      behavior: "smooth",
+    });
+  });
+}
+
+// ======================================
+// REVEAL ANIMATIONS
+// ======================================
+
+let revealObserver;
+
+function observeReveals(root = document) {
+  const items = root?.querySelectorAll?.(".reveal:not(.visible)") || [];
+
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    items.forEach((item) => {
+      item.classList.add("visible");
+    });
 
     return;
   }
 
-  if (!/^\+?[0-9 ()-]{9,18}$/.test(phone)) {
-    $("#cardError").textContent = "Проверь номер телефона.";
+  if (!("IntersectionObserver" in window)) {
+    items.forEach((item) => {
+      item.classList.add("visible");
+    });
 
     return;
   }
 
-  // Сохраняем только тип карты,
-  // последние четыре цифры и замаскированный телефон.
+  if (!revealObserver) {
+    revealObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("visible");
 
-  pendingCard = {
-    type,
+            revealObserver.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.12 },
+    );
+  }
 
-    last4: number.slice(-4),
-
-    phoneMasked: maskPhone(phone),
-
-    channel: $("#verifyChannel").value,
-  };
-
-  // Очищаем полное значение номера.
-
-  $("#cardNumber").value = "";
-
-  $("#cardModal").hidden = true;
-
-  $("#otpDescription").textContent = `
-
-    Демо-подтверждение ${type}
-    •••• ${pendingCard.last4}
-    через ${pendingCard.channel.toUpperCase()}.
-    Реальная отправка кода не подключена.
-
-  `;
-
-  $("#otpCode").value = "";
-
-  $("#otpError").textContent = "";
-
-  $("#otpModal").hidden = false;
+  items.forEach((item) => {
+    revealObserver.observe(item);
+  });
 }
 
 // ======================================
-// CONFIRM CARD
+// LANGUAGE REFRESH
 // ======================================
 
-function handleOtpSubmit(event) {
-  event.preventDefault();
+function setupLanguageRefresh() {
+  document.addEventListener("languagechange", () => {
+    renderNotifications();
 
-  if ($("#otpCode").value !== "123456") {
-    $("#otpError").textContent = "Неверный тестовый код. Используй 123456.";
+    renderLineFilters();
 
-    return;
-  }
+    renderStationGroups();
 
-  if (!pendingCard) return;
+    fillRouteSelects();
 
-  const result = addDemoCard(pendingCard);
+    syncAuthButton();
 
-  if (!result.ok && result.reason === "duplicate") {
-    $("#otpError").textContent =
-      "Такая карта уже добавлена (совпадает тип и последние 4 цифры).";
-
-    return;
-  }
-
-  pendingCard = null;
-
-  $("#otpModal").hidden = true;
-
-  renderProfile();
-
-  toast("Карта добавлена в демо-профиль");
+    renderProfile();
+  });
 }
 
 // ======================================
@@ -1082,17 +1173,19 @@ function handleOtpSubmit(event) {
 // ======================================
 
 function init() {
+  initI18n();
+
+  initTheme();
+
   setupNavigation();
 
   setupModals();
-
-  setupTheme();
 
   setupClock();
 
   setupNotifications();
 
-  setupMapSearch();
+  setupMapDirectory();
 
   setupRoutePlanner();
 
@@ -1100,9 +1193,19 @@ function init() {
 
   setupProfile();
 
+  setupExtras();
+
+  initReviews();
+
+  setupLanguageRefresh();
+
+  observeReveals(document);
+
   renderProfile();
+
+  showPage("home");
 }
 
-// Start application.
+// Запуск приложения.
 
 init();
